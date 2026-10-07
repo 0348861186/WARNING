@@ -1,5 +1,5 @@
-streamlit
-google-genai
-pillow
-pydantic
-requests
+streamlit>=1.35.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+google-genai>=0.1.1
+reportlab>=4.0.0
