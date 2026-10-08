@@ -9,13 +9,11 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CODE 4 - SMART INVENTORY / SHIPMENT CHECK (OPTIMIZED)
-# Nâng cấp & Vá lỗi:
-# - Bổ sung Alias từ thực tế: 新ETD, 装柜日期, 注文数(CTNS)
-# - ffill cho cả Date và Invoice khi bị merge cell
-# - Lưu kết quả tính toán vào st.session_state (tránh mất state khi gọi Gemini)
-# - Gemini 2.5 Flash
-# - Excel report & PDF report
+# CODE 4 - SMART INVENTORY / SHIPMENT CHECK (BUGFIXED)
+# Sửa lỗi:
+# - ValueError: The truth value of a Series is ambiguous
+# - Tránh trùng tên cột khi map canonical
+# - Ép kiểu Series an toàn trong parse_quantity & parse_custom_date
 # ============================================================
 
 APP_TITLE = "📦 Hệ Thống Đối Chiếu Lịch Xuất Hàng & Quản Lý Tồn Kho"
@@ -59,8 +57,6 @@ st.caption(
 
 # ------------------------------------------------------------
 # COLUMN ALIASES
-# Chuẩn hóa nhiều cách đặt tên cột khác nhau về 4 trường chuẩn.
-# Ưu tiên các cột chi tiết hơn trước.
 # ------------------------------------------------------------
 COLUMN_ALIASES = {
     "date": [
@@ -143,7 +139,6 @@ with st.sidebar:
 # ============================================================
 
 def normalize_text(value):
-    """Chuẩn hóa text để so sánh tên cột."""
     if value is None:
         return ""
     text = str(value).strip().lower()
@@ -153,13 +148,14 @@ def normalize_text(value):
 
 
 def remove_accents(value):
-    """Bỏ dấu để phục vụ fuzzy matching tên cột."""
     text = normalize_text(value)
     text = unicodedata.normalize("NFKD", text)
     return "".join(c for c in text if not unicodedata.combining(c))
 
 
 def clean_cell(value):
+    if isinstance(value, pd.Series):
+        value = value.iloc[0]
     if pd.isna(value):
         return None
     if isinstance(value, str):
@@ -174,7 +170,6 @@ def clean_cell(value):
 # ============================================================
 
 def get_excel_sheets(uploaded_file):
-    """Đọc danh sách sheet để người dùng biết file có nhiều sheet."""
     if uploaded_file.name.lower().endswith(".csv"):
         return ["CSV"]
 
@@ -190,7 +185,6 @@ def get_excel_sheets(uploaded_file):
 
 
 def read_raw_file(uploaded_file, sheet_name=None):
-    """Đọc file với header=None để tự dò header."""
     name = uploaded_file.name.lower()
     uploaded_file.seek(0)
 
@@ -214,13 +208,11 @@ def read_raw_file(uploaded_file, sheet_name=None):
 # ============================================================
 
 def score_header_row(row_values, file_type):
-    """Chấm điểm một dòng có khả năng là header."""
     values = [normalize_text(v) for v in row_values if clean_cell(v) is not None]
     if not values:
         return 0
 
     score = 0
-
     for canonical, aliases in COLUMN_ALIASES.items():
         alias_norm = {normalize_text(x) for x in aliases}
         alias_ascii = {remove_accents(x) for x in aliases}
@@ -237,7 +229,6 @@ def score_header_row(row_values, file_type):
 
 
 def detect_header_row(raw_df, file_type="shipment"):
-    """Tự tìm dòng header trong khoảng 50 dòng đầu file."""
     max_scan = min(len(raw_df), 50)
     best_row = 0
     best_score = -1
@@ -255,7 +246,6 @@ def detect_header_row(raw_df, file_type="shipment"):
 
 
 def make_unique_columns(columns):
-    """Tránh lỗi khi Excel có tên cột trùng nhau."""
     result = []
     counter = {}
 
@@ -301,10 +291,10 @@ def find_column_by_alias(columns, aliases):
 
 
 def detect_columns(df, file_type):
-    """Tự map cột thật → tên chuẩn."""
     columns = [str(c).strip() for c in df.columns]
     mapping = {}
 
+    # Dò cột theo thứ tự ưu tiên
     mapping["item"] = find_column_by_alias(columns, COLUMN_ALIASES["item"])
     mapping["qty"] = find_column_by_alias(columns, COLUMN_ALIASES["qty"])
 
@@ -316,32 +306,47 @@ def detect_columns(df, file_type):
 
 
 def normalize_columns(df, mapping, file_type):
-    """Đổi tên cột về schema chuẩn."""
+    """
+    Chuyển đổi các cột đã tìm thấy về tên chuẩn và loại bỏ trùng lặp cột.
+    """
+    df = df.copy()
     rename_map = {}
-    for key, actual in mapping.items():
-        if actual:
-            rename_map[actual] = CANONICAL_NAMES[key]
+    selected_cols = []
 
-    df = df.rename(columns=rename_map).copy()
+    for key, actual in mapping.items():
+        if actual and actual in df.columns:
+            canonical = CANONICAL_NAMES[key]
+            rename_map[actual] = canonical
+            selected_cols.append(actual)
+
+    # Đổi tên và chỉ lấy đúng các cột chuẩn
+    df = df.rename(columns=rename_map)
+    canonical_list = list(rename_map.values())
+    
+    # Đảm bảo không bị trùng cột nếu có 2 cột cùng tên
+    df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 
 # ============================================================
-# SMART DATE PARSER
+# SMART DATE PARSER (BUGFIX)
 # ============================================================
 
 def parse_custom_date(value, reference_date=None):
-    """
-    Hỗ trợ:
-    1/Oct, 3-Oct, 16/Oct
-    4/thg 9, 04-thg 9
-    04/09/2026, 2026-09-04
-    Excel serial date
-    """
     if reference_date is None:
         reference_date = TODAY
 
-    if value is None or pd.isna(value):
+    # Nếu truyền vào là Series do trùng cột, lấy phần tử đầu tiên
+    if isinstance(value, pd.Series):
+        value = value.dropna().iloc[0] if not value.dropna().empty else None
+
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
         return None
 
     if isinstance(value, pd.Timestamp):
@@ -366,7 +371,7 @@ def parse_custom_date(value, reference_date=None):
     if not text:
         return None
 
-    # Hỗ trợ dạng: 1/Oct, 3-Oct, 16/Oct
+    # Hỗ trợ: 1/Oct, 3-Oct, 16/Oct
     month_en = {
         "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
         "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
@@ -433,20 +438,27 @@ def parse_custom_date(value, reference_date=None):
 
 
 # ============================================================
-# SMART NUMBER PARSER
+# SMART NUMBER PARSER (BUGFIX TRỰC TIẾP)
 # ============================================================
 
 def parse_quantity(value):
-    """Chuẩn hóa số lượng từ Excel/CSV."""
-    if value is None or pd.isna(value):
+    # Nếu vô tình nhận phải Series, bóc giá trị đầu tiên
+    if isinstance(value, pd.Series):
+        value = value.dropna().iloc[0] if not value.dropna().empty else None
+
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
         return None
 
     if isinstance(value, bool):
         return None
 
     if isinstance(value, (int, float)):
-        if pd.isna(value):
-            return None
         return float(value)
 
     text = str(value).strip()
@@ -485,21 +497,18 @@ def parse_quantity(value):
 # ============================================================
 
 def clean_dataframe(df):
-    """Xóa dòng hoàn toàn rỗng và chuẩn hóa cell."""
     df = df.copy()
     df = df.dropna(how="all")
 
     for col in df.columns:
+        if isinstance(df[col], pd.DataFrame):
+            df[col] = df[col].iloc[:, 0]
         df[col] = df[col].apply(clean_cell)
 
     return df.reset_index(drop=True)
 
 
 def smart_import(uploaded_file, file_type, selected_sheet=None):
-    """
-    Pipeline:
-    read raw → detect header → normalize columns → ffill → validate.
-    """
     raw = read_raw_file(uploaded_file, selected_sheet)
 
     if raw is None or raw.empty:
@@ -519,7 +528,7 @@ def smart_import(uploaded_file, file_type, selected_sheet=None):
             "ok": False,
             "errors": [
                 "Không thể tự nhận diện dòng tiêu đề.",
-                "Hãy kiểm tra file có chứa các cột cần thiết (Ngày, INV, Tên hàng, Số lượng) hay không."
+                "Hãy kiểm tra file có chứa các cột cần thiết hay không."
             ],
             "warnings": [],
             "df": None,
@@ -556,18 +565,20 @@ def smart_import(uploaded_file, file_type, selected_sheet=None):
     df = normalize_columns(df, mapping, file_type)
     warnings = []
 
-    # Xử lý Merge Cell bằng ffill cho cả Date và INV
+    # Xử lý Merge Cell bằng ffill
     if file_type == "shipment":
         cols_to_ffill = [CANONICAL_NAMES["date"], CANONICAL_NAMES["inv"]]
         for col in cols_to_ffill:
             if col in df.columns:
-                before = df[col].isna().sum()
-                df[col] = df[col].ffill()
-                after = df[col].isna().sum()
-                if before > 0 and after < before:
-                    warnings.append(
-                        f"Đã tự điền {before - after} ô trống do merge cell cho cột '{col}'."
-                    )
+                target_col = df[col]
+                if isinstance(target_col, pd.Series):
+                    before = target_col.isna().sum()
+                    df[col] = target_col.ffill()
+                    after = df[col].isna().sum()
+                    if before > 0 and after < before:
+                        warnings.append(
+                            f"Đã tự điền {before - after} ô trống do merge cell cho cột '{col}'."
+                        )
 
     return {
         "ok": True,
@@ -588,6 +599,11 @@ def validate_shipment(df):
     errors = []
     warnings = []
     work = df.copy()
+
+    # Đảm bảo các cột quan trọng không bị nhân bản (DataFrame con)
+    for col in [CANONICAL_NAMES["item"], CANONICAL_NAMES["qty"], CANONICAL_NAMES["date"], CANONICAL_NAMES["inv"]]:
+        if col in work.columns and isinstance(work[col], pd.DataFrame):
+            work[col] = work[col].iloc[:, 0]
 
     # Item
     empty_item = work["品名"].isna() | (work["品名"].astype(str).str.strip() == "")
@@ -628,6 +644,10 @@ def validate_stock(df):
     warnings = []
     work = df.copy()
 
+    for col in [CANONICAL_NAMES["item"], CANONICAL_NAMES["qty"]]:
+        if col in work.columns and isinstance(work[col], pd.DataFrame):
+            work[col] = work[col].iloc[:, 0]
+
     empty_item = work["品名"].isna() | (work["品名"].astype(str).str.strip() == "")
     if empty_item.any():
         warnings.append(f"{int(empty_item.sum())} dòng tồn kho không có tên sản phẩm.")
@@ -655,7 +675,6 @@ def calculate_fifo(df_exp, df_stock):
     work = df_exp.copy()
     work["_Original_Order"] = range(len(work))
 
-    # Sắp xếp FIFO theo ngày xuất, cùng ngày giữ thứ tự gốc
     work = work.sort_values(
         by=["_Parsed_Date", "_Original_Order"],
         na_position="last"
@@ -1148,7 +1167,6 @@ try:
         st.info("Hãy kiểm tra cấu trúc dữ liệu phía trên và nhấn nút để bắt đầu phân tích.")
         st.stop()
 
-    # Load calculated results
     res = st.session_state["calc_result"]
     df_detail = res["df_detail"]
     df_alerts = res["df_alerts"]
