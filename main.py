@@ -2,21 +2,20 @@ import streamlit as st
 import pandas as pd
 import datetime as dt
 import io
+import os
 import re
 import unicodedata
+import urllib.request
 from pathlib import Path
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# SMART INVENTORY & SHIPMENT DASHBOARD (FULL FEATURES)
-# - Dashboard hiển thị 7 cột: Ngày | INV | Sản phẩm | Cần xuất | Tồn cấp | Thiếu | Trạng thái
-# - Nút Tải Báo Cáo Excel (định dạng màu tự động, auto-fit cột)
-# - Nút Tải Báo Cáo PDF (hỗ trợ font Unicode tiếng Việt)
-# - Phân tích AI Gemini 2.5 Flash
+# SMART INVENTORY & SHIPMENT DASHBOARD (VIETNAMESE - CHINESE)
+# 系统：出货排程对比与库存管理系统 (中越双语)
 # ============================================================
 
-APP_TITLE = "📦 Hệ Thống Đối Chiếu Lịch Xuất Hàng & Quản Lý Tồn Kho"
+APP_TITLE = "📦 Đối Chiếu Xuất Hàng & Tồn Kho | 出货排程对比与库存管理"
 TODAY = dt.date.today()
 
 # ------------------------------------------------------------
@@ -45,14 +44,14 @@ except ImportError:
 # PAGE CONFIG
 # ------------------------------------------------------------
 st.set_page_config(
-    page_title="Đối Chiếu Xuất Kho",
+    page_title="Đối Chiếu Xuất Kho | 出货排程对比",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title(APP_TITLE)
 st.caption(
-    "Smart Import → Xử lý Merge Cell → FIFO Engine → Dashboard Trực Quan → Xuất Excel & PDF → AI"
+    "Smart Import → Xử lý Merge Cell → FIFO Engine → Dashboard Song Ngữ (中越双语) → Xuất Excel & PDF"
 )
 
 # ------------------------------------------------------------
@@ -63,19 +62,19 @@ COLUMN_ALIASES = {
         "新ETD", "装柜日期", "最初ETD", "ETD",
         "箱詰めの日", "箱詰め日", "Ngày đóng hàng", "Ngày xuất",
         "Ngày xuất hàng", "Ngày đóng", "Shipment Date", "Ship Date",
-        "Packing Date", "Date", "Ngày"
+        "Packing Date", "Date", "Ngày", "日期", "出货日期"
     ],
     "inv": [
         "INV№", "INV", "Invoice", "Invoice No", "Invoice Number",
-        "Số INV", "Số Invoice", "Mã INV", "INV No", "オーダー№"
+        "Số INV", "Số Invoice", "Mã INV", "INV No", "オーダー№", "发票号", "订单号"
     ],
     "item": [
         "品名", "品目", "Tên hàng", "Tên sản phẩm", "Sản phẩm",
-        "Product Name", "Product", "Item", "Item Name", "SKU", "Mã hàng"
+        "Product Name", "Product", "Item", "Item Name", "SKU", "Mã hàng", "产品名称"
     ],
     "qty": [
-        "注文数(CTNS)", "注文数（CTNS）", "注文数", "Số lượng đặt",
-        "出荷数(CTNS)", "出荷数（CTNS）", "出荷数", "出荷数量",
+        "注文数(CTNS)", "注文数（CTNS）", "注文数", "Số lượng đặt", "订单数",
+        "出荷数(CTNS)", "出荷数（CTNS）", "出荷数", "出荷数量", "出货数",
         "Số lượng", "Số lượng xuất", "Số lượng (CTNS)",
         "Quantity", "Qty", "CTNS", "Shipment Qty", "Export Qty"
     ],
@@ -92,26 +91,26 @@ CANONICAL_NAMES = {
 # UI SIDEBAR
 # ------------------------------------------------------------
 with st.sidebar:
-    st.header("⚙️ Cấu hình")
+    st.header("⚙️ Cấu hình | 配置")
 
     gemini_api_key = st.text_input(
-        "Google Gemini API Key (tùy chọn)",
+        "Google Gemini API Key (Tùy chọn | 可选)",
         type="password",
-        help="Dùng Gemini để phân tích rủi ro và đề xuất hành động."
+        help="Dùng Gemini để phân tích rủi ro tồn kho / 使用Gemini进行AI库存风险分析"
     )
 
     st.divider()
 
-    st.subheader("1️⃣ Lịch xuất hàng")
+    st.subheader("1️⃣ Lịch xuất hàng | 出货计划")
     file_export = st.file_uploader(
-        "Upload Excel / CSV",
+        "Tải lên Excel / CSV (上传文件)",
         type=["xlsx", "xls", "csv"],
         key="export"
     )
 
-    st.subheader("2️⃣ Tồn kho")
+    st.subheader("2️⃣ Tồn kho | 现存库存")
     file_stock = st.file_uploader(
-        "Upload Excel / CSV",
+        "Tải lên Excel / CSV (上传文件)",
         type=["xlsx", "xls", "csv"],
         key="stock"
     )
@@ -119,19 +118,19 @@ with st.sidebar:
     st.divider()
 
     alert_days = st.slider(
-        "🚨 Cảnh báo trước (ngày)",
+        "🚨 Cảnh báo trước (ngày) | 提前预警天数",
         min_value=1,
         max_value=30,
         value=3
     )
 
     include_overdue = st.checkbox(
-        "Bao gồm đơn đã quá hạn",
+        "Bao gồm đơn đã quá hạn | 包括逾期订单",
         value=True
     )
 
     st.divider()
-    st.caption("Auto FIFO Engine & Risk Detector")
+    st.caption("FIFO Inventory Engine • Song ngữ 中越双语")
 
 
 # ============================================================
@@ -421,7 +420,7 @@ def parse_quantity(value):
     if not text:
         return None
 
-    text = re.sub(r"(?i)(ctns?|pcs?|cái|thùng)\s*$", "", text).strip()
+    text = re.sub(r"(?i)(ctns?|pcs?|cái|thùng|件|箱)\s*$", "", text).strip()
     text = text.replace("\u00a0", "")
 
     if "," in text and "." in text:
@@ -467,13 +466,13 @@ def clean_dataframe(df):
 def smart_import(uploaded_file, file_type, selected_sheet=None):
     raw = read_raw_file(uploaded_file, selected_sheet)
     if raw is None or raw.empty:
-        return {"ok": False, "errors": ["File không có dữ liệu."]}
+        return {"ok": False, "errors": ["File không có dữ liệu | 文件无数据。"]}
 
     header_row, header_score = detect_header_row(raw, file_type)
     if header_row is None:
         return {
             "ok": False,
-            "errors": ["Không nhận diện được dòng tiêu đề. Vui lòng kiểm tra các cột bắt buộc."]
+            "errors": ["Không nhận diện được tiêu đề. Vui lòng kiểm tra cột bắt buộc | 无法识别标题行。"]
         }
 
     headers = make_unique_columns(raw.iloc[header_row].tolist())
@@ -488,7 +487,7 @@ def smart_import(uploaded_file, file_type, selected_sheet=None):
 
     missing = [x for x in required if not mapping.get(x)]
     if missing:
-        return {"ok": False, "errors": [f"Thiếu các cột bắt buộc: {', '.join(missing)}"]}
+        return {"ok": False, "errors": [f"Thiếu các cột bắt buộc | 缺少必要列: {', '.join(missing)}"]}
 
     df = normalize_columns(df, mapping, file_type)
     warnings = []
@@ -503,7 +502,7 @@ def smart_import(uploaded_file, file_type, selected_sheet=None):
                     df[col] = target_col.ffill()
                     after = df[col].isna().sum()
                     if before > 0 and after < before:
-                        warnings.append(f"Đã tự điền {before - after} ô trống merge cell cho cột '{col}'.")
+                        warnings.append(f"Tự động điền {before - after} ô trống merge cell cho cột | 已自动填充合并单元格: '{col}'.")
 
     return {
         "ok": True,
@@ -525,7 +524,7 @@ def validate_shipment(df):
 
     empty_item = work["品名"].isna() | (work["品名"].astype(str).str.strip() == "")
     if empty_item.any():
-        warnings.append(f"{int(empty_item.sum())} dòng không có tên sản phẩm (đã loại bỏ).")
+        warnings.append(f"{int(empty_item.sum())} dòng không có tên sản phẩm (bỏ qua) | 缺少品名（已跳过）。")
 
     work = work[~empty_item].copy()
     work["品名"] = work["品名"].astype(str).str.strip()
@@ -534,7 +533,7 @@ def validate_shipment(df):
 
     negative_qty = work["出荷数(CTNS)"].notna() & (work["出荷数(CTNS)"] < 0)
     if negative_qty.any():
-        errors.append(f"{int(negative_qty.sum())} dòng có số lượng âm.")
+        errors.append(f"{int(negative_qty.sum())} dòng có số lượng âm | 存在负数数量。")
 
     return work, errors, warnings
 
@@ -554,32 +553,32 @@ def validate_stock(df):
 
     negative_qty = work["出荷数(CTNS)"].notna() & (work["出荷数(CTNS)"] < 0)
     if negative_qty.any():
-        errors.append(f"{int(negative_qty.sum())} dòng tồn kho có số lượng âm.")
+        errors.append(f"{int(negative_qty.sum())} dòng tồn kho có số lượng âm | 库存存在负数数量。")
 
     return work, errors, warnings
 
 
 # ============================================================
-# FIFO ENGINE & RISK CLASSIFICATION
+# FIFO ENGINE & RISK CLASSIFICATION (BILINGUAL)
 # ============================================================
 
-def classify_risk(shortage, date_value, today, alert_days):
+def classify_risk_bilingual(shortage, date_value, today, alert_days):
     if pd.isna(shortage):
-        return "⚫ Dữ liệu lỗi"
+        return "⚫ Lỗi dữ liệu | 数据错误"
     if shortage <= 0:
-        return "🟢 Đủ"
+        return "🟢 Đủ | 充足"
     if pd.isna(date_value) or date_value is None:
-        return "⚫ Thiếu ngày"
+        return "⚫ Thiếu ngày | 缺少日期"
 
     days_left = (date_value - today).days
     if days_left < 0:
-        return "🔴 Quá hạn"
+        return "🔴 Quá hạn | 逾期"
     if days_left == 0:
-        return "🔴 Hôm nay"
+        return "🔴 Hôm nay | 今日出货"
     if days_left <= alert_days:
-        return "🟠 Sắp đến hạn"
+        return "🟠 Sắp đến hạn | 即将到期"
 
-    return "🟡 Thiếu"
+    return "🟡 Thiếu | 缺货"
 
 
 def calculate_fifo(df_exp, df_stock, alert_days):
@@ -614,25 +613,24 @@ def calculate_fifo(df_exp, df_stock, alert_days):
         shortage = max(req_qty - allocated, 0)
         stock_dict[item] = max(available - req_qty, 0)
 
-        # Định dạng ngày chuẩn DD/Mon
         if pd.notna(row["_Parsed_Date"]):
             date_display = row["_Parsed_Date"].strftime("%d/%b")
         else:
             date_display = str(row["箱詰めの日"])
 
-        # Trạng thái theo đúng yêu cầu
-        status_label = "🟢 Đủ" if shortage == 0 else "🔴 Thiếu"
-        risk_label = classify_risk(shortage, row["_Parsed_Date"], TODAY, alert_days)
+        # Trạng thái song ngữ Việt - Trung
+        status_label = "🟢 Đủ | 充足" if shortage == 0 else "🔴 Thiếu | 缺货"
+        risk_label = classify_risk_bilingual(shortage, row["_Parsed_Date"], TODAY, alert_days)
 
         detail_records.append({
-            "Ngày": date_display,
-            "INV": str(row["INV№"]),
-            "Sản phẩm": item,
-            "Cần xuất": int(req_qty) if req_qty.is_integer() else req_qty,
-            "Tồn cấp": int(allocated) if allocated.is_integer() else allocated,
-            "Thiếu": int(shortage) if shortage.is_integer() else shortage,
-            "Trạng thái": status_label,
-            "Mức độ rủi ro": risk_label,
+            "Ngày / 日期": date_display,
+            "INV / 发票号": str(row["INV№"]),
+            "Sản phẩm / 品名": item,
+            "Cần xuất / 出货需求": int(req_qty) if req_qty.is_integer() else req_qty,
+            "Tồn cấp / 库存分配": int(allocated) if allocated.is_integer() else allocated,
+            "Thiếu / 缺货数": int(shortage) if shortage.is_integer() else shortage,
+            "Trạng thái / 状态": status_label,
+            "Rủi ro / 风险等级": risk_label,
             "_Parsed_Date": row["_Parsed_Date"],
         })
 
@@ -641,7 +639,7 @@ def calculate_fifo(df_exp, df_stock, alert_days):
 
 def build_alerts(df_detail, alert_days, include_overdue):
     df = df_detail.copy()
-    base = (df["Thiếu"].fillna(0) > 0) & df["_Parsed_Date"].notna()
+    base = (df["Thiếu / 缺货数"].fillna(0) > 0) & df["_Parsed_Date"].notna()
     future_or_today = (
         (df["_Parsed_Date"] >= TODAY) &
         (df["_Parsed_Date"] <= TODAY + dt.timedelta(days=alert_days))
@@ -652,18 +650,19 @@ def build_alerts(df_detail, alert_days, include_overdue):
     alerts = df[mask].copy()
 
     if not alerts.empty:
-        alerts["Số ngày còn lại"] = alerts["_Parsed_Date"].apply(lambda x: (x - TODAY).days)
+        alerts["Số ngày còn lại / 剩余天数"] = alerts["_Parsed_Date"].apply(lambda x: (x - TODAY).days)
         severity_order = {
-            "🔴 Quá hạn": 0, "🔴 Hôm nay": 1, "🟠 Sắp đến hạn": 2, "🟡 Thiếu": 3
+            "🔴 Quá hạn | 逾期": 0, "🔴 Hôm nay | 今日出货": 1,
+            "🟠 Sắp đến hạn | 即将到期": 2, "🟡 Thiếu | 缺货": 3
         }
-        alerts["_RiskOrder"] = alerts["Mức độ rủi ro"].map(severity_order).fillna(9)
+        alerts["_RiskOrder"] = alerts["Rủi ro / 风险等级"].map(severity_order).fillna(9)
         alerts = alerts.sort_values(by=["_RiskOrder", "_Parsed_Date"]).drop(columns=["_RiskOrder"])
 
     return alerts
 
 
 # ============================================================
-# EXCEL EXPORT ENGINE
+# EXCEL EXPORT (UNICODE SAFE & SONG NGỮ)
 # ============================================================
 
 def autosize_worksheet(ws):
@@ -672,30 +671,34 @@ def autosize_worksheet(ws):
         col_letter = get_column_letter(column_cells[0].column)
         for cell in column_cells:
             try:
-                length = len(str(cell.value)) if cell.value is not None else 0
+                # Tính độ dài an toàn cho cả ký tự CJK và Latin
+                val = str(cell.value) if cell.value is not None else ""
+                length = sum(2 if ord(c) > 127 else 1 for c in val)
                 max_length = max(max_length, min(length, 60))
             except Exception:
                 pass
-        ws.column_dimensions[col_letter].width = max(12, max_length + 3)
+        ws.column_dimensions[col_letter].width = max(14, max_length + 3)
 
 
 def export_excel(df_detail, df_alerts, df_stock_summary, validation_warnings):
     output = io.BytesIO()
 
-    # Loại bỏ cột kỹ thuật nội bộ trước khi export
     detail_export = df_detail.drop(columns=["_Parsed_Date"], errors="ignore").copy()
     alert_export = df_alerts.drop(columns=["_Parsed_Date"], errors="ignore").copy()
     stock_export = df_stock_summary.copy()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        detail_export.to_excel(writer, sheet_name="DoiChieuChiTiet", index=False)
-        alert_export.to_excel(writer, sheet_name="CanhBao", index=False)
-        stock_export.to_excel(writer, sheet_name="TonKhoConLai", index=False)
+        detail_export.to_excel(writer, sheet_name="DoiChieu_对比明细", index=False)
+        alert_export.to_excel(writer, sheet_name="CanhBao_预警明细", index=False)
+        stock_export.to_excel(writer, sheet_name="TonKho_剩余库存", index=False)
         pd.DataFrame({
-            "CanhBao": validation_warnings or ["Không có cảnh báo dữ liệu."]
-        }).to_excel(writer, sheet_name="KiemTraDuLieu", index=False)
+            "Cảnh báo dữ liệu / 数据检查警告": validation_warnings or ["Không có cảnh báo / 校验正常无警告。"]
+        }).to_excel(writer, sheet_name="KiemTra_数据校验", index=False)
 
         wb = writer.book
+
+        header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+        normal_font = Font(name="Segoe UI", size=10)
 
         header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
@@ -704,45 +707,84 @@ def export_excel(df_detail, df_alerts, df_stock_summary, validation_warnings):
         for ws in wb.worksheets:
             for cell in ws[1]:
                 cell.fill = header_fill
-                cell.font = Font(color="FFFFFF", bold=True)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.font = normal_font
+
             ws.freeze_panes = "A2"
             autosize_worksheet(ws)
 
-        ws_detail = wb["DoiChieuChiTiet"]
+        ws_detail = wb["DoiChieu_对比明细"]
         status_col = None
         for cell in ws_detail[1]:
-            if cell.value == "Trạng thái":
+            if "Trạng thái" in str(cell.value):
                 status_col = cell.column
 
         if status_col:
             for row in range(2, ws_detail.max_row + 1):
                 val = str(ws_detail.cell(row, status_col).value)
-                if "Thiếu" in val:
+                if "Thiếu" in val or "缺货" in val:
                     for col in range(1, ws_detail.max_column + 1):
                         ws_detail.cell(row, col).fill = red_fill
-                elif "Đủ" in val:
+                elif "Đủ" in val or "充足" in val:
                     ws_detail.cell(row, status_col).fill = green_fill
 
     return output.getvalue()
 
 
 # ============================================================
-# PDF EXPORT ENGINE
+# PDF EXPORT (FONT CJK & UNICODE ĐA NGÔN NGỮ)
 # ============================================================
 
-def find_unicode_font():
-    candidates = [
-        r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
-        r"C:\Windows\Fonts\NotoSans-Regular.ttf",
+def setup_unicode_font():
+    """
+    Tự động dò và nạp font Unicode hỗ trợ cả tiếng Việt và chữ Hán (CJK).
+    Nếu trên server/cloud không có, sẽ tự động tải font mã nguồn mở về thư mục làm việc.
+    """
+    system_fonts = [
+        # Windows CJK & Unicode
+        r"C:\Windows\Fonts\msyh.ttc",        # Microsoft YaHei
+        r"C:\Windows\Fonts\msyh.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",      # SimSun
+        r"C:\Windows\Fonts\simhei.ttf",      # SimHei
+        r"C:\Windows\Fonts\arialuni.ttf",    # Arial Unicode MS
+        r"C:\Windows\Fonts\seguisym.ttf",
+        # Linux / Ubuntu CJK
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     ]
-    for path in candidates:
-        if Path(path).exists():
-            return path
-    return None
+
+    for p in system_fonts:
+        if Path(p).exists():
+            try:
+                pdfmetrics.registerFont(TTFont("BilingualFont", p))
+                return "BilingualFont"
+            except Exception:
+                continue
+
+    # Fallback: Tự động tải font Google Noto Sans SC về nếu đang chạy trên cloud/Linux container
+    local_font_path = Path("NotoSansSC-Regular.ttf")
+    if not local_font_path.exists():
+        try:
+            url = "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf"
+            urllib.request.urlretrieve(url, local_font_path)
+        except Exception:
+            pass
+
+    if local_font_path.exists():
+        try:
+            pdfmetrics.registerFont(TTFont("BilingualFont", str(local_font_path)))
+            return "BilingualFont"
+        except Exception:
+            pass
+
+    return "Helvetica"
 
 
 def export_pdf(df_detail):
@@ -750,54 +792,67 @@ def export_pdf(df_detail):
         return None
 
     buffer = io.BytesIO()
-    font_path = find_unicode_font()
-    font_name = "Helvetica"
-
-    if font_path:
-        try:
-            pdfmetrics.registerFont(TTFont("SmartUnicode", font_path))
-            font_name = "SmartUnicode"
-        except Exception:
-            font_name = "Helvetica"
+    font_name = setup_unicode_font()
 
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
-        rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20
+        rightMargin=15, leftMargin=15, topMargin=20, bottomMargin=20
     )
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
-        "PDFTitle", parent=styles["Title"], fontName=font_name, fontSize=16, leading=20
+        "PDFTitle",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=15,
+        leading=18
     )
     sub_style = ParagraphStyle(
-        "PDFSub", parent=styles["Normal"], fontName=font_name, fontSize=9, leading=12
+        "PDFSub",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=8,
+        leading=11
     )
 
     elements = [
-        Paragraph("BÁO CÁO ĐỐI CHIẾU XUẤT HÀNG & TỒN KHO", title_style),
-        Spacer(1, 8),
-        Paragraph(f"Ngày xuất báo cáo: {TODAY.strftime('%d/%m/%Y')}", sub_style),
+        Paragraph("BÁO CÁO ĐỐI CHIẾU XUẤT HÀNG & TỒN KHO | 出货排程与库存对比报告", title_style),
+        Spacer(1, 6),
+        Paragraph(f"Ngày xuất / 报告日期: {TODAY.strftime('%d/%m/%Y')}", sub_style),
         Spacer(1, 10)
     ]
 
-    headers = ["Ngày", "INV", "Sản phẩm", "Cần xuất", "Tồn cấp", "Thiếu", "Trạng thái"]
+    headers = [
+        "Ngày\n日期",
+        "INV\n发票号",
+        "Sản phẩm\n品名",
+        "Cần xuất\n需求(CTN)",
+        "Tồn cấp\n分配(CTN)",
+        "Thiếu\n缺货(CTN)",
+        "Trạng thái\n状态"
+    ]
     data = [headers]
 
     for _, row in df_detail.iterrows():
-        # Xóa icon emoji để tránh crash font trong ReportLab PDF
-        status_clean = str(row.get("Trạng thái", "")).replace("🟢", "").replace("🔴", "").strip()
+        # Xóa emoji tròn để không xung đột với các font chữ Hán thuần túy
+        status_clean = (
+            str(row.get("Trạng thái / 状态", ""))
+            .replace("🟢", "")
+            .replace("🔴", "")
+            .strip()
+        )
         data.append([
-            str(row.get("Ngày", "")),
-            str(row.get("INV", "")),
-            str(row.get("Sản phẩm", ""))[:40],
-            f"{row.get('Cần xuất', 0):,}",
-            f"{row.get('Tồn cấp', 0):,}",
-            f"{row.get('Thiếu', 0):,}",
+            str(row.get("Ngày / 日期", "")),
+            str(row.get("INV / 发票号", "")),
+            str(row.get("Sản phẩm / 品名", ""))[:35],
+            f"{row.get('Cần xuất / 出货需求', 0):,}",
+            f"{row.get('Tồn cấp / 库存分配', 0):,}",
+            f"{row.get('Thiếu / 缺货数', 0):,}",
             status_clean
         ])
 
-    table = Table(data, repeatRows=1, colWidths=[65, 80, 240, 75, 75, 75, 75])
+    table = Table(data, repeatRows=1, colWidths=[65, 80, 240, 75, 75, 75, 85])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -806,6 +861,8 @@ def export_pdf(df_detail):
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
 
     elements.append(table)
@@ -818,13 +875,13 @@ def export_pdf(df_detail):
 # ============================================================
 
 if not file_export or not file_stock:
-    st.info("👈 Hãy tải lên cả file Lịch Xuất Hàng và file Tồn Kho ở thanh bên trái.")
+    st.info("👈 Hãy tải lên cả file Lịch Xuất Hàng và Tồn Kho ở thanh bên trái | 请在左侧上传出货计划和库存文件。")
     st.markdown("""
-### Tính năng hệ thống:
-- ✅ Tự động gộp dữ liệu Merge Cell (INV, Ngày)
-- ✅ Phân bổ tồn kho theo thuật toán FIFO ngày xuất
-- ✅ Dashboard đối chiếu: **Ngày | INV | Sản phẩm | Cần xuất | Tồn cấp | Thiếu | Trạng thái**
-- ✅ Xuất báo cáo trực tiếp ra file Excel và PDF
+### Tính năng hệ thống | 系统功能:
+- ✅ Tự động gộp dữ liệu Merge Cell cho Ngày và Mã INV / 自动处理合并单元格
+- ✅ Phân bổ tồn kho theo thuật toán FIFO ngày xuất / 遵循出货排程先进先出 (FIFO)
+- ✅ Dashboard song ngữ trực quan: **Ngày / 日期 | INV / 发票号 | Sản phẩm / 品名 | Cần xuất / 出货需求 | Tồn cấp / 库存分配 | Thiếu / 缺货数 | Trạng thái / 状态**
+- ✅ Xuất file Excel & PDF chuẩn font Unicode, không bị lỗi dấu tiếng Việt và chữ Hán / 导出无乱码 Excel 与 PDF
 """)
     st.stop()
 
@@ -834,22 +891,43 @@ try:
 
     col1, col2 = st.columns(2)
     with col1:
-        selected_export_sheet = st.selectbox("📄 Sheet Lịch Xuất Hàng", export_sheets, key="selected_export_sheet")
+        selected_export_sheet = st.selectbox(
+            "📄 Sheet Lịch Xuất Hàng | 出货排程工作表",
+            export_sheets,
+            key="selected_export_sheet"
+        )
     with col2:
-        selected_stock_sheet = st.selectbox("📄 Sheet Tồn Kho", stock_sheets, key="selected_stock_sheet")
+        selected_stock_sheet = st.selectbox(
+            "📄 Sheet Tồn Kho | 库存工作表",
+            stock_sheets,
+            key="selected_stock_sheet"
+        )
 
-    shipment_import = smart_import(file_export, "shipment", selected_export_sheet if selected_export_sheet != "CSV" else None)
-    stock_import = smart_import(file_stock, "stock", selected_stock_sheet if selected_stock_sheet != "CSV" else None)
+    shipment_import = smart_import(
+        file_export,
+        "shipment",
+        selected_export_sheet if selected_export_sheet != "CSV" else None
+    )
+    stock_import = smart_import(
+        file_stock,
+        "stock",
+        selected_stock_sheet if selected_stock_sheet != "CSV" else None
+    )
 
     if not shipment_import["ok"] or not stock_import["ok"]:
-        st.error("❌ Không thể đọc file.")
+        st.error("❌ Không thể đọc file | 无法读取文件。")
         st.stop()
 
     df_exp, exp_errors, exp_warnings = validate_shipment(shipment_import["df"])
     df_stock, stock_errors, stock_warnings = validate_stock(stock_import["df"])
 
     all_errors = exp_errors + stock_errors
-    all_warnings = shipment_import.get("warnings", []) + stock_import.get("warnings", []) + exp_warnings + stock_warnings
+    all_warnings = (
+        shipment_import.get("warnings", [])
+        + stock_import.get("warnings", [])
+        + exp_warnings
+        + stock_warnings
+    )
 
     if all_errors:
         for err in all_errors:
@@ -861,11 +939,11 @@ try:
     if "calc_result" not in st.session_state:
         st.session_state["calc_result"] = None
 
-    if st.button("🚀 XÁC NHẬN & CHẠY ĐỐI CHIẾU TỒN KHO", type="primary", use_container_width=True):
-        with st.spinner("⚙️ Đang phân bổ tồn kho..."):
+    if st.button("🚀 XÁC NHẬN & CHẠY ĐỐI CHIẾU TỒN KHO | 确认并执行库存比对", type="primary", use_container_width=True):
+        with st.spinner("⚙️ Đang phân bổ tồn kho FIFO | 正在进行先进先出库存分配..."):
             df_detail, remaining_stock = calculate_fifo(df_exp, df_stock, alert_days)
             df_alerts = build_alerts(df_detail, alert_days, include_overdue)
-            stock_rows = [{"Sản phẩm": k, "Tồn kho còn lại": v} for k, v in remaining_stock.items()]
+            stock_rows = [{"Sản phẩm / 品名": k, "Tồn kho còn lại / 剩余库存": v} for k, v in remaining_stock.items()]
             df_stock_summary = pd.DataFrame(stock_rows)
 
             st.session_state["calc_result"] = {
@@ -876,7 +954,7 @@ try:
             }
 
     if st.session_state["calc_result"] is None:
-        st.info("Nhấn nút phía trên để bắt đầu đối chiếu dữ liệu.")
+        st.info("Nhấn nút phía trên để bắt đầu đối chiếu | 点击上方按钮执行分析。")
         st.stop()
 
     res = st.session_state["calc_result"]
@@ -886,23 +964,31 @@ try:
     warnings_list = res["all_warnings"]
 
     # --------------------------------------------------------
-    # METRICS
+    # METRICS (SONG NGỮ)
     # --------------------------------------------------------
     total_lines = len(df_detail)
-    shortage_lines = int((df_detail["Thiếu"] > 0).sum())
-    total_shortage = float(df_detail["Thiếu"].sum())
+    shortage_lines = int((df_detail["Thiếu / 缺货数"] > 0).sum())
+    total_shortage = float(df_detail["Thiếu / 缺货数"].sum())
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("📋 Tổng dòng xuất", f"{total_lines:,}")
-    m2.metric("⚠️ Dòng thiếu hàng", f"{shortage_lines:,}")
-    m3.metric("📦 Tổng thiếu", f"{total_shortage:,.0f} CTNS")
+    m1.metric("📋 Tổng dòng xuất | 出货总条目", f"{total_lines:,}")
+    m2.metric("⚠️ Dòng thiếu | 缺货条目", f"{shortage_lines:,}")
+    m3.metric("📦 Tổng thiếu | 缺货总量", f"{total_shortage:,.0f} CTNS")
 
     # --------------------------------------------------------
-    # DASHBOARD BẢNG ĐỐI CHIẾU (7 CỘT CHUẨN)
+    # DASHBOARD BẢNG ĐỐI CHIẾU SONG NGỮ (7 CỘT CHUẨN)
     # --------------------------------------------------------
-    st.subheader("📋 Bảng Đối Chiếu Lịch Xuất Hàng & Tồn Kho")
+    st.subheader("📋 Bảng Đối Chiếu Lịch Xuất Hàng & Tồn Kho | 出货排程与库存对比表")
 
-    display_cols = ["Ngày", "INV", "Sản phẩm", "Cần xuất", "Tồn cấp", "Thiếu", "Trạng thái"]
+    display_cols = [
+        "Ngày / 日期",
+        "INV / 发票号",
+        "Sản phẩm / 品名",
+        "Cần xuất / 出货需求",
+        "Tồn cấp / 库存分配",
+        "Thiếu / 缺货数",
+        "Trạng thái / 状态"
+    ]
     df_dashboard = df_detail[display_cols].copy()
 
     st.dataframe(
@@ -910,13 +996,13 @@ try:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Ngày": st.column_config.TextColumn("Ngày", width="small"),
-            "INV": st.column_config.TextColumn("INV", width="small"),
-            "Sản phẩm": st.column_config.TextColumn("Sản phẩm", width="large"),
-            "Cần xuất": st.column_config.NumberColumn("Cần xuất", format="%d"),
-            "Tồn cấp": st.column_config.NumberColumn("Tồn cấp", format="%d"),
-            "Thiếu": st.column_config.NumberColumn("Thiếu", format="%d"),
-            "Trạng thái": st.column_config.TextColumn("Trạng thái", width="small"),
+            "Ngày / 日期": st.column_config.TextColumn("Ngày / 日期", width="small"),
+            "INV / 发票号": st.column_config.TextColumn("INV / 发票号", width="small"),
+            "Sản phẩm / 品名": st.column_config.TextColumn("Sản phẩm / 品名", width="large"),
+            "Cần xuất / 出货需求": st.column_config.NumberColumn("Cần xuất / 需求", format="%d"),
+            "Tồn cấp / 库存分配": st.column_config.NumberColumn("Tồn cấp / 分配", format="%d"),
+            "Thiếu / 缺货数": st.column_config.NumberColumn("Thiếu / 缺货", format="%d"),
+            "Trạng thái / 状态": st.column_config.TextColumn("Trạng thái / 状态", width="medium"),
         }
     )
 
@@ -924,16 +1010,16 @@ try:
     # NÚT XUẤT BÁO CÁO (EXCEL & PDF)
     # --------------------------------------------------------
     st.divider()
-    st.subheader("📥 Xuất báo cáo đối chiếu")
+    st.subheader("📥 Xuất báo cáo | 导出报表")
 
     col_dl_a, col_dl_b = st.columns(2)
 
     with col_dl_a:
         excel_data = export_excel(df_detail, df_alerts, df_stock_summary, warnings_list)
         st.download_button(
-            "📥 Tải Excel Báo Cáo",
+            "📥 Tải Excel Báo Cáo | 下载 Excel 报表",
             data=excel_data,
-            file_name=f"Bao_Cao_Doi_Chieu_{TODAY}.xlsx",
+            file_name=f"Bao_Cao_Xuat_Kho_{TODAY}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
@@ -943,20 +1029,20 @@ try:
             pdf_data = export_pdf(df_detail)
             if pdf_data:
                 st.download_button(
-                    "📄 Tải PDF Báo Cáo",
+                    "📄 Tải PDF Báo Cáo | 下载 PDF 报表",
                     data=pdf_data,
-                    file_name=f"Bao_Cao_Doi_Chieu_{TODAY}.pdf",
+                    file_name=f"Bao_Cao_Xuat_Kho_{TODAY}.pdf",
                     mime="application/pdf",
                     use_container_width=True
                 )
         else:
-            st.warning("Cần cài đặt reportlab để xuất PDF: pip install reportlab")
+            st.warning("Cần cài reportlab: pip install reportlab")
 
     # --------------------------------------------------------
     # CÁC TAB CHI TIẾT & GEMINI AI
     # --------------------------------------------------------
     st.divider()
-    tab1, tab2 = st.tabs(["🏭 Tồn kho còn lại", "🤖 Phân tích Gemini AI"])
+    tab1, tab2 = st.tabs(["🏭 Tồn kho còn lại | 剩余库存", "🤖 Phân tích Gemini AI | 智能分析"])
 
     with tab1:
         st.dataframe(df_stock_summary, use_container_width=True, hide_index=True)
@@ -965,23 +1051,23 @@ try:
         if not HAS_GEMINI:
             st.error("Chưa cài google-genai: pip install google-genai")
         elif not gemini_api_key:
-            st.info("Nhập API Key ở thanh bên trái để phân tích rủi ro.")
+            st.info("Nhập API Key ở thanh bên trái để sử dụng Gemini / 请在左侧输入API Key。")
         else:
-            if st.button("🤖 Phân tích rủi ro đơn thiếu bằng Gemini", type="primary"):
-                df_short = df_detail[df_detail["Thiếu"] > 0][display_cols]
+            if st.button("🤖 Phân tích rủi ro đơn thiếu | 分析缺货风险", type="primary"):
+                df_short = df_detail[df_detail["Thiếu / 缺货数"] > 0][display_cols]
                 prompt = f"""
-Bạn là chuyên gia điều phối xuất hàng và quản lý tồn kho.
+Bạn là chuyên gia điều phối kho và logistics xuất nhập khẩu.
 Ngày hiện tại: {TODAY.strftime('%d/%m/%Y')}
 
-Dưới đây là danh sách các đơn hàng xuất khẩu bị thiếu tồn kho (phân bổ theo FIFO):
+Dưới đây là danh sách các đơn hàng xuất khẩu bị thiếu hàng (đã tính bằng FIFO):
 {df_short.to_string(index=False)}
 
-Hãy đưa ra đánh giá bằng tiếng Việt:
-1. 🔴 Đơn nào nguy cấp nhất cần bổ sung sản xuất ngay?
-2. 📋 Đề xuất thứ tự ưu tiên xử lý đơn hàng.
-3. 🛠️ 3 hành động khắc phục cụ thể cho bộ phận sản xuất và điều phối kho.
+Hãy đưa ra đánh giá song ngữ (hoặc tiếng Việt có chú thích tiếng Trung cho các thuật ngữ chính):
+1. 🔴 Đơn hàng nào có nguy cơ trễ tàu/chậm giao hàng cao nhất?
+2. 📋 Đề xuất thứ tự ưu tiên sản xuất và đóng hàng.
+3. 🛠️ 3 hành động cụ thể để xử lý số lượng thiếu ({total_shortage:,.0f} CTNS).
 """
-                with st.spinner("Gemini đang phân tích..."):
+                with st.spinner("Gemini đang phân tích | AI 正在分析中..."):
                     try:
                         client = genai.Client(api_key=gemini_api_key)
                         resp = client.models.generate_content(
